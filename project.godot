@@ -1,0 +1,21 @@
+config_version=5
+
+[application]
+
+config/name="Glowshift"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.7")
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/mode=2
+window/stretch/mode="canvas_items"
+window/stretch/aspect="keep"
+
+[rendering]
+
+viewport/hdr_2d=true
+anti_aliasing/quality/msaa_2d=2
+environment/defaults/default_clear_color=Color(0.012, 0.012, 0.035, 1)
