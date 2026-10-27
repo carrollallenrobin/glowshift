@@ -60,13 +60,15 @@ func _finish() -> void:
 		"built a combo": game.max_combo > 1,
 		"killed a splitter": splitters_killed > 0,
 		"spawned power-ups": pickups_seen.size() > 0,
-		"loaded all sounds": game.sfx.size() == 8,
+		"loaded all sounds": game.sfx.size() == 9,
+		"synthesized the music loop": game.music_stream != null and game.music_stream.data.size() > 0,
+		"recorded the cause of death": game.killed_by != "",
 	}
 	var failed: Array[String] = []
 	for name in checks:
 		if not checks[name]:
 			failed.append(name)
-	print("level=%d score=%d kills=%d max_combo=%d splitters=%d" % [game.level, game.score, game.kills, game.max_combo, splitters_killed])
+	print("level=%d score=%d kills=%d grazes=%d max_combo=%d splitters=%d killed_by=%s" % [game.level, game.score, game.kills, game.grazes, game.max_combo, splitters_killed, game.killed_by])
 	if failed.is_empty():
 		print("SMOKE OK")
 		_quit(0)

@@ -13,8 +13,8 @@ const COMBO_TIME := 2.2
 const MAX_COMBO := 10
 const MAX_HUNTERS := 70
 const GRID_STEP := 48.0
-const SAVE_PATH := "user://best.save"
-const RATE := 22050
+const GRAZE_DIST := 20.0  # extra distance around a hunter that still counts as a close call
+const DEADZONE := 0.25
 
 # HDR colors: channels above 1.0 bloom through the glow pass.
 const CYAN := Color(0.4, 1.6, 2.2)
@@ -43,6 +43,7 @@ class Hunter:
 	var age: float = 0.0
 	var warn: float = 0.0  # darts sit and telegraph before launching
 	var aim: Vector2 = Vector2.RIGHT
+	var grazed := false
 
 
 class Spark:
@@ -119,6 +120,8 @@ var spawn_timer := 0.0
 var pickup_timer := 0.0
 var death_timer := 0.0
 var over_timer := 0.0
+var grazes := 0
+var killed_by := ""
 
 var hunters: Array[Hunter] = []
 var sparks: Array[Spark] = []
@@ -132,27 +135,43 @@ var grid_rows := 0
 var grid_off := PackedVector2Array()
 var grid_vel := PackedVector2Array()
 
+var settings := GameSettings.new()
 var sfx: Dictionary = {}
 var voices: Array[AudioStreamPlayer] = []
 var next_voice := 0
+var music_player: AudioStreamPlayer
+var music_builder: Synth.MusicBuilder
+var music_stream: AudioStreamWAV
+var soft_glow := false  # the Compatibility renderer (web) has no 2D bloom, so draw halos by hand
 var hud: Node2D
 var bg_mat: ShaderMaterial
 var post_mat: ShaderMaterial
 var font_b: Font
 var font_m: Font
 var rng := RandomNumberGenerator.new()
-var persist := true  # tests turn this off so they never touch the player's best score
+var version: String = ProjectSettings.get_setting("application/config/version", "")
+var persist := true:  # tests turn this off so they never touch the player's settings or best score
+	set(value):
+		persist = value
+		settings.persist = value
 
 
 func _ready() -> void:
 	get_window().title = ProjectSettings.get_setting("application/config/name")
 	rng.randomize()
-	best = _load_best()
+	settings.load_file()
+	best = settings.best
+	soft_glow = RenderingServer.get_current_rendering_method() == "gl_compatibility"
 	font_b = _make_font(800)
 	font_m = _make_font(500)
 	_setup_scene()
 	_setup_grid()
 	_build_sounds()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and state == State.PLAYING:
+		paused = true
 
 
 # --- setup -------------------------------------------------------------
@@ -210,62 +229,40 @@ func _setup_grid() -> void:
 	grid_vel.resize(grid_cols * grid_rows)
 
 
-func _load_best() -> int:
-	if FileAccess.file_exists(SAVE_PATH):
-		var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
-		if f:
-			return f.get_32()
-	return 0
-
-
-func _save_best() -> void:
-	if not persist:
-		return
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
-	if f:
-		f.store_32(best)
-
-
 # --- sound (synthesized at startup, no audio files) --------------------
 
 func _build_sounds() -> void:
-	sfx["pickup"] = _synth(0.11, 880.0, 1760.0, 0.0, false, 1.5)
-	sfx["dash"] = _synth(0.16, 420.0, 120.0, 0.85, false, 2.0)
-	sfx["kill"] = _synth(0.24, 240.0, 50.0, 0.55, true, 1.8)
-	sfx["death"] = _synth(0.95, 130.0, 28.0, 0.5, false, 1.2)
-	sfx["power"] = _synth(0.3, 500.0, 1500.0, 0.0, true, 1.0)
-	sfx["level"] = _synth(0.5, 660.0, 990.0, 0.0, false, 1.0)
-	sfx["shield"] = _synth(0.22, 300.0, 900.0, 0.3, false, 1.5)
-	sfx["dart"] = _synth(0.12, 1400.0, 700.0, 0.2, true, 2.0)
+	sfx = Synth.effects()
 	for i in 10:
 		var v := AudioStreamPlayer.new()
 		v.volume_db = -8.0
 		add_child(v)
 		voices.append(v)
+	music_player = AudioStreamPlayer.new()
+	music_player.volume_db = -13.0
+	add_child(music_player)
+	music_builder = Synth.MusicBuilder.new()
 
 
-func _synth(dur: float, f0: float, f1: float, noise: float, square: bool, decay: float) -> AudioStreamWAV:
-	var n := int(dur * RATE)
-	var buf := PackedByteArray()
-	buf.resize(n * 2)
-	var phase := 0.0
-	for i in n:
-		var p := float(i) / n
-		phase += TAU * lerpf(f0, f1, p) / RATE
-		var v := sin(phase)
-		if square:
-			v = signf(v) * 0.5
-		v = v * (1.0 - noise) + rng.randf_range(-1.0, 1.0) * noise
-		var env := pow(1.0 - p, decay) * minf(1.0, i / 80.0)
-		buf.encode_s16(i * 2, int(clampf(v * env, -1.0, 1.0) * 30000.0))
-	var s := AudioStreamWAV.new()
-	s.format = AudioStreamWAV.FORMAT_16_BITS
-	s.mix_rate = RATE
-	s.data = buf
-	return s
+func _update_music() -> void:
+	if music_builder:
+		music_builder.step(4000)  # about a quarter of a 60 fps frame
+		if music_builder.done():
+			music_stream = music_builder.stream()
+			music_player.stream = music_stream
+			music_builder = null
+	if music_player.stream == null:
+		return
+	var want := settings.music and not paused
+	if want and not music_player.playing:
+		music_player.play()
+	elif not want and music_player.playing:
+		music_player.stop()
 
 
 func _play(sound: String, pitch: float = 1.0) -> void:
+	if not settings.sound:
+		return
 	var v := voices[next_voice]
 	next_voice = (next_voice + 1) % voices.size()
 	v.stream = sfx[sound]
@@ -301,6 +298,8 @@ func _start() -> void:
 	shield = false
 	slow_timer = 0.0
 	magnet_timer = 0.0
+	grazes = 0
+	killed_by = ""
 	for i in 3:
 		_spawn_spark()
 	_show_banner("GO")
@@ -314,31 +313,83 @@ func _show_banner(text: String) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if not (event is InputEventKey and event.pressed and not event.echo):
+	var action := _action_for(event)
+	if action == "":
 		return
-	var k: int = event.keycode
-	if k == KEY_F11 or k == KEY_F:
-		_toggle_fullscreen()
-		return
-	var go := k == KEY_SPACE or k == KEY_ENTER or k == KEY_R
+	match action:
+		"fullscreen":
+			_toggle_fullscreen()
+		"sound":
+			settings.sound = not settings.sound
+			settings.save()
+		"music":
+			settings.music = not settings.music
+			settings.save()
+		"effects":
+			settings.reduced_effects = not settings.reduced_effects
+			settings.save()
+		_:
+			_game_action(action)
+
+
+func _game_action(action: String) -> void:
 	match state:
 		State.PLAYING:
-			if k == KEY_ESCAPE or k == KEY_P:
+			if action == "pause" or (paused and action == "back"):
 				paused = not paused
-			elif paused and k == KEY_Q:
+			elif paused and action == "quit":
 				get_tree().quit()
-			elif not paused and (k == KEY_SPACE or k == KEY_SHIFT or k == KEY_J):
+			elif not paused and (action == "dash" or action == "confirm"):
 				_try_dash()
 		State.TITLE:
-			if go:
+			if action == "confirm" or action == "dash":
 				_start()
-			elif k == KEY_ESCAPE:
+			elif action == "back":
 				get_tree().quit()
 		State.OVER:
-			if go and over_timer > 0.8:
+			if (action == "confirm" or action == "dash") and over_timer > 0.8:
 				_start()
-			elif k == KEY_ESCAPE:
+			elif action == "back":
 				get_tree().quit()
+
+
+## Maps keyboard and gamepad input to one action name, or "" for anything else.
+func _action_for(event: InputEvent) -> String:
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_F, KEY_F11:
+				return "fullscreen"
+			KEY_M:
+				return "sound"
+			KEY_N:
+				return "music"
+			KEY_V:
+				return "effects"
+			KEY_SPACE:
+				return "confirm"
+			KEY_ENTER, KEY_KP_ENTER, KEY_R:
+				return "confirm" if state != State.PLAYING else ""
+			KEY_SHIFT, KEY_J:
+				return "dash"
+			KEY_ESCAPE:
+				return "pause" if state == State.PLAYING else "back"
+			KEY_P:
+				return "pause"
+			KEY_Q:
+				return "quit"
+	elif event is InputEventJoypadButton and event.pressed:
+		match event.button_index:
+			JOY_BUTTON_A, JOY_BUTTON_RIGHT_SHOULDER, JOY_BUTTON_LEFT_SHOULDER:
+				return "confirm"
+			JOY_BUTTON_START:
+				return "pause" if state == State.PLAYING else "confirm"
+			JOY_BUTTON_B:
+				return "back" if paused else ""
+			JOY_BUTTON_BACK:
+				return "quit" if paused else ""
+	elif event is InputEventJoypadMotion and event.axis == JOY_AXIS_TRIGGER_RIGHT and event.axis_value > 0.6:
+		return "dash" if state == State.PLAYING and not paused else ""
+	return ""
 
 
 func _toggle_fullscreen() -> void:
@@ -359,6 +410,19 @@ func _input_dir() -> Vector2:
 		d.y -= 1.0
 	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
 		d.y += 1.0
+	if d == Vector2.ZERO:
+		for pad in Input.get_connected_joypads():
+			var stick := Vector2(Input.get_joy_axis(pad, JOY_AXIS_LEFT_X), Input.get_joy_axis(pad, JOY_AXIS_LEFT_Y))
+			if stick.length() > DEADZONE:
+				return stick.limit_length(1.0)
+			if Input.is_joy_button_pressed(pad, JOY_BUTTON_DPAD_LEFT):
+				d.x -= 1.0
+			if Input.is_joy_button_pressed(pad, JOY_BUTTON_DPAD_RIGHT):
+				d.x += 1.0
+			if Input.is_joy_button_pressed(pad, JOY_BUTTON_DPAD_UP):
+				d.y -= 1.0
+			if Input.is_joy_button_pressed(pad, JOY_BUTTON_DPAD_DOWN):
+				d.y += 1.0
 	return d.normalized()
 
 
@@ -404,7 +468,15 @@ func _process(delta: float) -> void:
 
 	if not paused:
 		_update_fx(gdt)
+	_update_music()
+	var mouse := Input.MOUSE_MODE_HIDDEN if state == State.PLAYING and not paused else Input.MOUSE_MODE_VISIBLE
+	if Input.mouse_mode != mouse:
+		Input.mouse_mode = mouse
 
+	if settings.reduced_effects:
+		shake = minf(shake, 2.0)
+		flash = 0.0
+		aberr = 0.0
 	shake = maxf(0.0, shake - dt * 40.0)
 	flash = maxf(0.0, flash - dt * 2.5)
 	aberr = maxf(0.0, aberr - dt * 3.0)
@@ -445,7 +517,9 @@ func _update_game(dt: float) -> void:
 	_move_player(dt)
 
 	combo_timer -= dt
-	if combo_timer <= 0.0:
+	if combo_timer <= 0.0 and combo > 1:
+		if combo >= 3:
+			_popup(player + Vector2(0, -28), "COMBO LOST", DIM)
 		combo = 1
 
 	_update_sparks(dt)
@@ -602,7 +676,10 @@ func _check_hits() -> void:
 			continue
 		if h.kind != Kind.DART and h.age < 0.35:
 			continue
-		if h.pos.distance_to(player) >= h.r + PLAYER_R:
+		var d := h.pos.distance_to(player)
+		if d >= h.r + PLAYER_R:
+			if d < h.r + PLAYER_R + GRAZE_DIST and not h.grazed and dash_timer <= 0.0 and invuln <= 0.0:
+				_graze(h)
 			continue
 		if dash_timer > 0.0:
 			_kill(h, true)
@@ -616,8 +693,19 @@ func _check_hits() -> void:
 			_ring(player, 140.0, 0.5, BLUE)
 			_play("shield")
 		else:
-			_die()
+			_die(h)
 			return
+
+
+## A hunter brushed past without touching you: a small reward for living dangerously.
+func _graze(h: Hunter) -> void:
+	h.grazed = true
+	grazes += 1
+	var pts := 5 * combo
+	score += pts
+	_popup(player + Vector2(0, -30), "CLOSE +%d" % pts, Color(1.4, 1.4, 1.6))
+	_burst(player.lerp(h.pos, 0.5), Color(1.6, 1.6, 2.0), 6, 160.0, true)
+	_play("graze", rng.randf_range(0.95, 1.1))
 
 
 func _kill(h: Hunter, by_dash: bool) -> void:
@@ -652,7 +740,8 @@ func _kill(h: Hunter, by_dash: bool) -> void:
 	_play("kill", rng.randf_range(0.9, 1.15))
 
 
-func _die() -> void:
+func _die(h: Hunter) -> void:
+	killed_by = _hunter_name(h.kind)
 	state = State.DYING
 	death_timer = 0.0
 	shake = 20.0
@@ -664,7 +753,8 @@ func _die() -> void:
 	if score > best:
 		best = score
 		new_best = true
-		_save_best()
+		settings.best = best
+		settings.save()
 
 
 # --- spawning ----------------------------------------------------------
@@ -813,6 +903,8 @@ func _draw() -> void:
 		_draw_spark(s)
 	for h in hunters:
 		_draw_hunter(h)
+	if state == State.PLAYING:
+		_draw_edge_warnings()
 	for r in rings:
 		var a := r.life / r.max_life
 		draw_arc(r.pos, r.r, 0.0, TAU, 64, Color(r.color, a * 0.8), 1.0 + 3.0 * a)
@@ -879,7 +971,21 @@ func _shape(pts: PackedVector2Array, c: Color, width: float) -> void:
 	draw_colored_polygon(pts, Color(c.r * 0.1, c.g * 0.1, c.b * 0.1, c.a * 0.9))
 	var closed := pts.duplicate()
 	closed.append(pts[0])
+	if soft_glow:
+		draw_polyline(closed, Color(c, c.a * 0.12), width * 5.0)
+		draw_polyline(closed, Color(c, c.a * 0.25), width * 2.5)
 	draw_polyline(closed, c, width)
+
+
+func _hunter_name(kind: int) -> String:
+	match kind:
+		Kind.DART:
+			return "a dart"
+		Kind.SPLITTER:
+			return "a splitter"
+		Kind.MINI:
+			return "a mini"
+	return "a chaser"
 
 
 func _hunter_color(h: Hunter) -> Color:
@@ -912,6 +1018,20 @@ func _draw_hunter(h: Hunter) -> void:
 		_:
 			_shape(_star(h.pos, h.r, h.r * 0.55, 6, h.spin), c, 2.0)
 	draw_circle(h.pos, 2.2, Color(HOT, c.a))
+
+
+## Small arrows on the screen edge for hunters that are about to come in.
+func _draw_edge_warnings() -> void:
+	var inner := Rect2(0.0, 0.0, W, H)
+	for h in hunters:
+		if inner.has_point(h.pos) or h.kind == Kind.DART:
+			continue
+		var at := Vector2(clampf(h.pos.x, 14.0, W - 14.0), clampf(h.pos.y, 14.0, H - 14.0))
+		var dir := (CENTER - at).normalized()
+		var near := clampf(1.0 - (h.pos.distance_to(at) / 120.0), 0.2, 1.0)
+		var xf := Transform2D(dir.angle(), at)
+		var c := Color(_hunter_color(h), 0.35 + 0.5 * near)
+		draw_colored_polygon(xf * PackedVector2Array([Vector2(8, 0), Vector2(-5, -6), Vector2(-5, 6)]), c)
 
 
 func _draw_spark(s: Spark) -> void:
@@ -987,12 +1107,15 @@ func _draw_hud() -> void:
 		State.TITLE:
 			_htext(255.0 + sin(time * 1.5) * 5.0, "GLOWSHIFT", 104, Color(0.5, 1.25, 1.6), font_b)
 			_htext(325.0, "Collect gold sparks. Dodge the hunters.", 26, TEXT)
-			_htext(375.0, "Move  WASD / Arrows      Dash  Space      Pause  Esc      Fullscreen  F", 20, DIM)
+			_htext(375.0, "Move  WASD / Arrows / Stick      Dash  Space / A      Pause  Esc / Start", 20, DIM)
 			_htext(408.0, "Dash through hunters to destroy them. Each dash kill refunds your dash.", 20, DIM)
-			_htext(441.0, "Grab sparks quickly to build a combo up to x10.", 20, DIM)
-			_htext(530.0, "PRESS SPACE", 30, Color(GOLD, 0.55 + 0.45 * sin(time * 4.0)), font_b)
+			_htext(441.0, "Grab sparks quickly to build a combo up to x10. Near misses score too.", 20, DIM)
+			_htext(520.0, "PRESS SPACE", 30, Color(GOLD, 0.55 + 0.45 * sin(time * 4.0)), font_b)
 			if best > 0:
-				_htext(580.0, "BEST  %d" % best, 20, DIM)
+				_htext(565.0, "BEST  %d" % best, 20, DIM)
+			_draw_settings_line(H - 30.0)
+			if version != "":
+				hud.draw_string(font_m, Vector2(W - 120.0, H - 30.0), "v" + version, HORIZONTAL_ALIGNMENT_RIGHT, 100.0, 16, Color(DIM, 0.5))
 		State.PLAYING, State.DYING:
 			_draw_play_hud()
 		State.OVER:
@@ -1005,9 +1128,11 @@ func _draw_hud() -> void:
 			else:
 				_htext(365.0, "BEST  %d" % best, 22, DIM)
 			var t := int(elapsed)
-			_htext(430.0, "Time %d:%02d     Kills %d     Max combo x%d     Level %d" % [t / 60, t % 60, kills, max_combo, level], 22, DIM)
+			if killed_by != "":
+				_htext(410.0, "Caught by %s" % killed_by, 20, Color(RED.r * 0.4, RED.g * 0.6, RED.b * 0.6, 0.9))
+			_htext(450.0, "Time %d:%02d     Kills %d     Close calls %d     Max combo x%d     Level %d" % [t / 60, t % 60, kills, grazes, max_combo, level], 22, DIM)
 			if over_timer > 0.8:
-				_htext(520.0, "Space to play again        Esc to quit", 24, TEXT)
+				_htext(530.0, "Space to play again        Esc to quit", 24, TEXT)
 
 	if banner_timer > 0.0 and state == State.PLAYING:
 		var a := minf(1.0, banner_timer * 2.0)
@@ -1018,6 +1143,14 @@ func _draw_hud() -> void:
 		hud.draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, 0.55))
 		_htext(H / 2.0, "PAUSED", 72, CYAN, font_b)
 		_htext(H / 2.0 + 50.0, "Esc to resume        Q to quit", 22, DIM)
+		_draw_settings_line(H / 2.0 + 110.0)
+
+
+func _draw_settings_line(y: float) -> void:
+	var on := func(v: bool) -> String: return "On" if v else "Off"
+	var line := "M  Sound %s      N  Music %s      V  Effects %s      F  Fullscreen" % [
+		on.call(settings.sound), on.call(settings.music), "Reduced" if settings.reduced_effects else "Full"]
+	_htext(y, line, 16, Color(DIM, 0.6))
 
 
 func _draw_play_hud() -> void:
