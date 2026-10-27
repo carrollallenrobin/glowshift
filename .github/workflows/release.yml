@@ -27,7 +27,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check version matches tag
         run: |
@@ -44,7 +44,7 @@ jobs:
           rm godot.zip
 
       - name: Cache export templates
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/share/godot/export_templates/${{ env.GODOT_VERSION }}.stable
           key: godot-export-templates-${{ env.GODOT_VERSION }}
@@ -91,7 +91,7 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "Glowshift ${GITHUB_REF_NAME}" --notes-file notes.md --verify-tag
 
       - name: Upload web build
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: build/web
 
@@ -109,4 +109,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
