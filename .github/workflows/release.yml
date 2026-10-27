@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  GODOT_VERSION: 4.7.2
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Godot
+        run: |
+          curl -sSfL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          rm godot.zip
+
+      - name: Cache export templates
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/export_templates/${{ env.GODOT_VERSION }}.stable
+          key: godot-export-templates-${{ env.GODOT_VERSION }}
+
+      - name: Install export templates
+        run: |
+          dir="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          if [ ! -f "$dir/version.txt" ]; then
+            curl -sSfL -o templates.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+            unzip -q templates.tpz
+            mkdir -p "$dir"
+            mv templates/* "$dir"/
+            rm -rf templates templates.tpz
+          fi
+
+      - name: Check version matches tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -q "config/version=\"${version}\"" project.godot || { echo "project.godot config/version does not match ${GITHUB_REF_NAME}"; exit 1; }
+          grep -q "^## \[${version}\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for ${version}"; exit 1; }
+
+      - name: Import project
+        run: godot --headless --path . --import
+
+      - name: Smoke test
+        run: |
+          godot --headless --fixed-fps 60 --path . -s res://tests/smoke_test.gd 2>&1 | tee smoke.log
+          grep -q "SMOKE OK" smoke.log
+          if grep -E "SCRIPT ERROR|^ERROR:" smoke.log; then exit 1; fi
+
+      - name: Export
+        run: |
+          mkdir -p build/macos build/windows build/linux
+          godot --headless --path . --export-release macOS build/macos/Glowshift.zip
+          godot --headless --path . --export-release Windows build/windows/Glowshift.exe
+          godot --headless --path . --export-release Linux build/linux/Glowshift.x86_64
+          test -s build/macos/Glowshift.zip
+          test -s build/windows/Glowshift.exe
+          test -s build/linux/Glowshift.x86_64
+
+      - name: Package
+        run: |
+          mkdir dist
+          cp build/macos/Glowshift.zip "dist/Glowshift-${GITHUB_REF_NAME}-macos.zip"
+          (cd build/windows && zip -q "../../dist/Glowshift-${GITHUB_REF_NAME}-windows.zip" Glowshift.exe)
+          (cd build/linux && chmod +x Glowshift.x86_64 && zip -q "../../dist/Glowshift-${GITHUB_REF_NAME}-linux.zip" Glowshift.x86_64)
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {p=1; next} /^## \[/ {p=0} /^\[.*\]: / {p=0} p' CHANGELOG.md > notes.md
+          ls -la dist
+          cat notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Glowshift ${GITHUB_REF_NAME}" --notes-file notes.md

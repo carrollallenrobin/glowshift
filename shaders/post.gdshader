@@ -7,7 +7,7 @@ uniform float flash = 0.0;
 void fragment() {
 	vec2 uv = SCREEN_UV;
 	vec2 d = uv - 0.5;
-	float off = 0.006 + aberration * 0.05;
+	float off = 0.003 + aberration * 0.03;
 	vec3 c;
 	c.r = texture(screen_tex, uv + d * off).r;
 	c.g = texture(screen_tex, uv).g;

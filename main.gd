@@ -141,9 +141,11 @@ var post_mat: ShaderMaterial
 var font_b: Font
 var font_m: Font
 var rng := RandomNumberGenerator.new()
+var persist := true  # tests turn this off so they never touch the player's best score
 
 
 func _ready() -> void:
+	get_window().title = ProjectSettings.get_setting("application/config/name")
 	rng.randomize()
 	best = _load_best()
 	font_b = _make_font(800)
@@ -217,6 +219,8 @@ func _load_best() -> int:
 
 
 func _save_best() -> void:
+	if not persist:
+		return
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f:
 		f.store_32(best)
@@ -313,6 +317,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not (event is InputEventKey and event.pressed and not event.echo):
 		return
 	var k: int = event.keycode
+	if k == KEY_F11 or k == KEY_F:
+		_toggle_fullscreen()
+		return
 	var go := k == KEY_SPACE or k == KEY_ENTER or k == KEY_R
 	match state:
 		State.PLAYING:
@@ -332,6 +339,14 @@ func _unhandled_input(event: InputEvent) -> void:
 				_start()
 			elif k == KEY_ESCAPE:
 				get_tree().quit()
+
+
+func _toggle_fullscreen() -> void:
+	var win := get_window()
+	if win.mode == Window.MODE_FULLSCREEN:
+		win.mode = Window.MODE_MAXIMIZED
+	else:
+		win.mode = Window.MODE_FULLSCREEN
 
 
 func _input_dir() -> Vector2:
@@ -623,7 +638,7 @@ func _kill(h: Hunter, by_dash: bool) -> void:
 	_explode(h.pos, c, 1.6 if h.kind == Kind.SPLITTER else 1.0)
 	hitstop = 0.045
 	shake = maxf(shake, 7.0)
-	aberr = maxf(aberr, 0.25)
+	aberr = maxf(aberr, 0.15)
 	if by_dash:
 		dash_cd = 0.0  # every dash kill refunds the dash, so kills can chain
 	if h.kind == Kind.SPLITTER:
@@ -972,7 +987,7 @@ func _draw_hud() -> void:
 		State.TITLE:
 			_htext(255.0 + sin(time * 1.5) * 5.0, "GLOWSHIFT", 104, Color(0.5, 1.25, 1.6), font_b)
 			_htext(325.0, "Collect gold sparks. Dodge the hunters.", 26, TEXT)
-			_htext(375.0, "Move  WASD / Arrows        Dash  Space        Pause  Esc", 20, DIM)
+			_htext(375.0, "Move  WASD / Arrows      Dash  Space      Pause  Esc      Fullscreen  F", 20, DIM)
 			_htext(408.0, "Dash through hunters to destroy them. Each dash kill refunds your dash.", 20, DIM)
 			_htext(441.0, "Grab sparks quickly to build a combo up to x10.", 20, DIM)
 			_htext(530.0, "PRESS SPACE", 30, Color(GOLD, 0.55 + 0.45 * sin(time * 4.0)), font_b)
