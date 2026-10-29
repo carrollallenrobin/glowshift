@@ -1,0 +1,95 @@
+name: Web
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "LICENSE"
+      - "assets/**"
+      - ".github/ISSUE_TEMPLATE/**"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+      - ".github/CODEOWNERS"
+      - ".github/FUNDING.yml"
+      - ".github/dependabot.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: 4.7.2
+
+jobs:
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Export web
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Godot
+        run: |
+          curl -sSfL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q godot.zip
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          rm godot.zip
+          godot --version
+
+      - name: Cache export templates
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/export_templates/${{ env.GODOT_VERSION }}.stable
+          key: godot-export-templates-${{ env.GODOT_VERSION }}
+
+      - name: Install export templates
+        run: |
+          dir="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          if [ ! -f "$dir/version.txt" ]; then
+            curl -sSfL -o templates.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+            unzip -q templates.tpz
+            mkdir -p "$dir"
+            mv templates/* "$dir"/
+            rm -rf templates templates.tpz
+          fi
+
+      - name: Export web
+        run: |
+          godot --headless --path . --import
+          mkdir -p build/web
+          godot --headless --path . --export-release Web build/web/index.html
+          test -s build/web/index.html
+          test -s build/web/index.wasm
+
+      - name: Upload web build
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  pages:
+    name: Deploy web build
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
